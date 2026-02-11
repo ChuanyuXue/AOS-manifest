@@ -1,0 +1,15 @@
+diff --git a/libsel4/include/sel4/shared_types.h b/libsel4/include/sel4/shared_types.h
+index fbcd62151..90ffe018b 100644
+--- a/libsel4/include/sel4/shared_types.h
++++ b/libsel4/include/sel4/shared_types.h
+@@ -9,8 +9,8 @@
+ /* this file is shared between the kernel and libsel4 */
+ 
+ typedef struct seL4_IPCBuffer_ {
+-    seL4_MessageInfo_t tag;
+-    seL4_Word msg[seL4_MsgMaxLength];
++    seL4_MessageInfo_t tag; // header / meta data
++    seL4_Word msg[seL4_MsgMaxLength]; // payload
+     seL4_Word userData;
+     seL4_Word caps_or_badges[seL4_MsgMaxExtraCaps];
+     seL4_CPtr receiveCNode;
