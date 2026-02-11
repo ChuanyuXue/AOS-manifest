@@ -49,11 +49,39 @@ int sos_read(int file, char *buf, size_t nbyte)
 
 int sos_write(int file, const char *buf, size_t nbyte)
 {
-    /* MILESTONE 0: implement this to use your syscall and
+    /* TODO MILESTONE 0: implement this to use your syscall and
      * writes to the network console!
      * Writing to files will come in later milestones.
      */
-    return sos_debug_print(buf, nbyte);
+
+    seL4_IPCBuffer *ipc_buf = seL4_GetIPCBuffer();
+    size_t bytes_sent = 0;
+
+    // batching
+    while (bytes_sent < nbyte) {
+        size_t max_chunk_size = seL4_MsgMaxLength * sizeof(seL4_Word);
+        size_t remaining = nbyte - bytes_sent;
+        size_t current_chunk_len = (remaining > max_chunk_size) ? max_chunk_size : remaining;
+
+        memcpy(&ipc_buf->msg[2], buf + bytes_sent, current_chunk_len);
+
+        seL4_Word words_to_send = (current_chunk_len + sizeof(seL4_Word) - 1) / sizeof(seL4_Word);
+        
+        seL4_SetMR(0, SOS_SYSCALL_WRITE);
+        seL4_SetMR(1, current_chunk_len); //First message register 
+        seL4_MessageInfo_t tag = seL4_MessageInfo_new(0, 0, 0, 2 + words_to_send);
+        // tag:
+        // label: SYSCALL ID
+        // no caps
+        // length = 1 + words_to_send
+
+        seL4_MessageInfo_t reply = seL4_Call(SOS_IPC_EP_CAP, tag);
+
+        bytes_sent += current_chunk_len;
+    }
+     
+    return bytes_sent;
+    // return sos_debug_print(buf, nbyte);
 }
 
 int sos_getdirent(int pos, char *name, size_t nbyte)

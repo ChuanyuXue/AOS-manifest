@@ -9,39 +9,36 @@
  *
  * @TAG(DATA61_GPL)
  */
-#include <autoconf.h>
-#include <utils/util.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <assert.h>
-#include <string.h>
-
-#include <cspace/cspace.h>
-#include <aos/sel4_zf_logif.h>
 #include <aos/debug.h>
-
+#include <aos/sel4_zf_logif.h>
+#include <assert.h>
+#include <autoconf.h>
 #include <clock/clock.h>
 #include <cpio/cpio.h>
+#include <cspace/cspace.h>
 #include <elf/elf.h>
 #include <networkconsole/networkconsole.h>
-
 #include <sel4runtime.h>
 #include <sel4runtime/auxv.h>
+#include <sos/gen_config.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <utils/util.h>
 
 #include "bootstrap.h"
-#include "irq.h"
-#include "network.h"
-#include "frame_table.h"
 #include "drivers/uart.h"
-#include "ut.h"
-#include "vmem_layout.h"
-#include "mapping.h"
 #include "elfload.h"
+#include "frame_table.h"
+#include "irq.h"
+#include "mapping.h"
+#include "network.h"
 #include "syscalls.h"
 #include "tests.h"
-#include "utils.h"
 #include "threads.h"
-#include <sos/gen_config.h>
+#include "ut.h"
+#include "utils.h"
+#include "vmem_layout.h"
 #ifdef CONFIG_SOS_GDB_ENABLED
 #include "debugger.h"
 #endif /* CONFIG_SOS_GDB_ENABLED */
@@ -57,12 +54,12 @@
  * All badged IRQs set high bit, then we use unique bits to
  * distinguish interrupt sources.
  */
-#define IRQ_EP_BADGE         BIT(seL4_BadgeBits - 1ul)
+#define IRQ_EP_BADGE BIT(seL4_BadgeBits - 1ul)
 #define IRQ_IDENT_BADGE_BITS MASK(seL4_BadgeBits - 1ul)
 
-#define APP_NAME             "console_test"
-#define APP_PRIORITY         (0)
-#define APP_EP_BADGE         (101)
+#define APP_NAME "console_test"
+#define APP_PRIORITY (0)
+#define APP_EP_BADGE (101)
 
 /* The number of additional stack pages to provide to the initial
  * process */
@@ -72,6 +69,8 @@
  * A dummy starting syscall
  */
 #define SOS_SYSCALL0 0
+#define SOS_SYSCALL_WRITE 1
+
 
 /* The linker will link this symbol to the start address  *
  * of an archive of attached applications.                */
@@ -79,7 +78,7 @@ extern char _cpio_archive[];
 extern char _cpio_archive_end[];
 extern char __eh_frame_start[];
 /* provided by gcc */
-extern void (__register_frame)(void *);
+extern void(__register_frame)(void*);
 
 /* root tasks cspace */
 cspace_t cspace;
@@ -87,22 +86,32 @@ cspace_t cspace;
 static seL4_CPtr sched_ctrl_start;
 static seL4_CPtr sched_ctrl_end;
 
-/* the one process we start */
-static struct {
-    ut_t *tcb_ut;
-    seL4_CPtr tcb;
-    ut_t *vspace_ut;
-    seL4_CPtr vspace;
 
-    ut_t *ipc_buffer_ut;
+// Should I persist network handle here:
+
+struct network_console *netcon = NULL;
+
+/* the one process we start */
+// User process struct (PCB)
+
+// Why each element has two var (ut_t + seL4_CPtr)
+// CPtr <- Index used for Caps
+// ut_t <- Address
+static struct {
+    ut_t* tcb_ut;
+    seL4_CPtr tcb;  // TCB is the Thread defined by seL4
+    ut_t* vspace_ut;
+    seL4_CPtr vspace;  // vspace is page directory
+
+    ut_t* ipc_buffer_ut;
     seL4_CPtr ipc_buffer;
 
-    ut_t *sched_context_ut;
+    ut_t* sched_context_ut;
     seL4_CPtr sched_context;
 
     cspace_t cspace;
 
-    ut_t *stack_ut;
+    ut_t* stack_ut;
     seL4_CPtr stack;
 } user_process;
 
@@ -110,8 +119,7 @@ static struct {
  * Deals with a syscall and sets the message registers before returning the
  * message info to be passed through to seL4_ReplyRecv()
  */
-seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge, UNUSED int num_args, bool *have_reply)
-{
+seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge, UNUSED int num_args, bool* have_reply) {
     seL4_MessageInfo_t reply_msg;
 
     /* get the first word of the message, which in the SOS protocol is the number
@@ -123,30 +131,42 @@ seL4_MessageInfo_t handle_syscall(UNUSED seL4_Word badge, UNUSED int num_args, b
 
     /* Process system call */
     switch (syscall_number) {
-    case SOS_SYSCALL0:
-        ZF_LOGV("syscall: thread example made syscall 0!\n");
-        /* construct a reply message of length 1 */
-        reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
-        /* Set the first (and only) word in the message to 0 */
-        seL4_SetMR(0, 0);
+        case SOS_SYSCALL_WRITE:
+            size_t len = seL4_GetMR(1);
+            seL4_IPCBuffer *ipc_buf = seL4_GetIPCBuffer();
+            char *string_data = (char *) &ipc_buf->msg[2];
+            printf("SOS Output: %.*s", (int)len, string_data);
+            // Don't set msg here
 
-        break;
-    default:
-        reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
-        ZF_LOGE("Unknown syscall %lu\n", syscall_number);
-        /* Don't reply to an unknown syscall */
-        *have_reply = false;
+            if (netcon != NULL) {
+                network_console_send(netcon, string_data, len);
+            }
+            reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+            // have reply always true
+            break;
+        case SOS_SYSCALL0:
+            ZF_LOGV("syscall: thread example made syscall 0!\n");
+            /* construct a reply message of length 1 */
+            reply_msg = seL4_MessageInfo_new(0, 0, 0, 1);
+            /* Set the first (and only) word in the message to 0 */
+            seL4_SetMR(0, 0);
+            break;
+        default:
+            reply_msg = seL4_MessageInfo_new(0, 0, 0, 0);
+            ZF_LOGE("Unknown syscall %lu\n", syscall_number);
+            /* Don't reply to an unknown syscall */
+            *have_reply = false;
     }
 
     return reply_msg;
 }
 
-NORETURN void syscall_loop(seL4_CPtr ep)
-{
+// Main loop SOS runs
+NORETURN void syscall_loop(seL4_CPtr ep) {
     seL4_CPtr reply;
 
     /* Create reply object */
-    ut_t *reply_ut = alloc_retype(&reply, seL4_ReplyObject, seL4_ReplyBits);
+    ut_t* reply_ut = alloc_retype(&reply, seL4_ReplyObject, seL4_ReplyBits);
     if (reply_ut == NULL) {
         ZF_LOGF("Failed to alloc reply object ut");
     }
@@ -169,13 +189,14 @@ NORETURN void syscall_loop(seL4_CPtr ep)
         /* Awake! We got a message - check the label and badge to
          * see what the message is about */
         seL4_Word label = seL4_MessageInfo_get_label(message);
+        // Damn we cannot use label for system call, it should be always 0?
+        // Not required by sel4 but if SOS follows this I follow this :)
 
         if (badge & IRQ_EP_BADGE) {
             /* It's a notification from our bound notification
              * object! */
             sos_handle_irq_notification(&badge, &have_reply);
         } else if (label == seL4_Fault_NullFault) {
-
             /* It's not a fault or an interrupt, it must be an IPC
              * message from console_test! */
             reply_msg = handle_syscall(badge, seL4_MessageInfo_get_length(message) - 1, &have_reply);
@@ -192,16 +213,14 @@ NORETURN void syscall_loop(seL4_CPtr ep)
     }
 }
 
-static int stack_write(seL4_Word *mapped_stack, int index, uintptr_t val)
-{
+static int stack_write(seL4_Word* mapped_stack, int index, uintptr_t val) {
     mapped_stack[index] = val;
     return index - 1;
 }
 
 /* set up System V ABI compliant stack, so that the process can
  * start up and initialise the C library */
-static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace, elf_t *elf_file)
-{
+static uintptr_t init_process_stack(cspace_t* cspace, seL4_CPtr local_vspace, elf_t* elf_file) {
     /* Create a stack frame */
     user_process.stack_ut = alloc_retype(&user_process.stack, seL4_ARM_SmallPageObject, seL4_PageBits);
     if (user_process.stack_ut == NULL) {
@@ -213,11 +232,11 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace, el
     uintptr_t stack_top = PROCESS_STACK_TOP;
     uintptr_t stack_bottom = PROCESS_STACK_TOP - PAGE_SIZE_4K;
     /* virtual addresses in the SOS's address space */
-    void *local_stack_top  = (seL4_Word *) SOS_SCRATCH;
+    void* local_stack_top = (seL4_Word*)SOS_SCRATCH;
     uintptr_t local_stack_bottom = SOS_SCRATCH - PAGE_SIZE_4K;
 
     /* find the vsyscall table */
-    uintptr_t *sysinfo = (uintptr_t *) elf_getSectionNamed(elf_file, "__vsyscall", NULL);
+    uintptr_t* sysinfo = (uintptr_t*)elf_getSectionNamed(elf_file, "__vsyscall", NULL);
     if (!sysinfo || !*sysinfo) {
         ZF_LOGE("could not find syscall table for c library");
         return 0;
@@ -346,14 +365,13 @@ static uintptr_t init_process_stack(cspace_t *cspace, seL4_CPtr local_vspace, el
 /* Start the first process, and return true if successful
  *
  * This function will leak memory if the process does not start successfully.
- * TODO: avoid leaking memory once you implement real processes, otherwise a user
+ * avoid leaking memory once you implement real processes, otherwise a user
  *       can force your OS to run out of memory by creating lots of failed processes.
  */
-bool start_first_process(char *app_name, seL4_CPtr ep)
-{
+bool start_first_process(char* app_name, seL4_CPtr ep) {
     /* Create a VSpace */
     user_process.vspace_ut = alloc_retype(&user_process.vspace, seL4_ARM_PageGlobalDirectoryObject,
-                                              seL4_PGDBits);
+                                          seL4_PGDBits);
     if (user_process.vspace_ut == NULL) {
         return false;
     }
@@ -374,7 +392,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
 
     /* Create an IPC buffer */
     user_process.ipc_buffer_ut = alloc_retype(&user_process.ipc_buffer, seL4_ARM_SmallPageObject,
-                                                  seL4_PageBits);
+                                              seL4_PageBits);
     if (user_process.ipc_buffer_ut == NULL) {
         ZF_LOGE("Failed to alloc ipc buffer ut");
         return false;
@@ -415,7 +433,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
 
     /* Create scheduling context */
     user_process.sched_context_ut = alloc_retype(&user_process.sched_context, seL4_SchedContextObject,
-                                                     seL4_MinSchedContextBits);
+                                                 seL4_MinSchedContextBits);
     if (user_process.sched_context_ut == NULL) {
         ZF_LOGE("Failed to alloc sched context ut");
         return false;
@@ -430,7 +448,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
 
     /* bind sched context, set fault endpoint and priority
      * In MCS, fault end point needed here should be in current thread's cspace.
-     * NOTE this will use the unbadged ep unlike above, you might want to mint it with a badge
+     *  this will use the unbadged ep unlike above, you might want to mint it with a badge
      * so you can identify which thread faulted in your fault handler */
     err = seL4_TCB_SetSchedParams(user_process.tcb, seL4_CapInitThreadTCB, seL4_MinPrio, APP_PRIORITY,
                                   user_process.sched_context, ep);
@@ -447,7 +465,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
     elf_t elf_file = {};
     unsigned long elf_size;
     size_t cpio_len = _cpio_archive_end - _cpio_archive;
-    const char *elf_base = cpio_get_file(_cpio_archive, cpio_len, app_name, &elf_size);
+    const char* elf_base = cpio_get_file(_cpio_archive, cpio_len, app_name, &elf_size);
     if (elf_base == NULL) {
         ZF_LOGE("Unable to locate cpio header for %s", app_name);
         return false;
@@ -481,7 +499,7 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
         .pc = elf_getEntryPoint(&elf_file),
         .sp = sp,
     };
-    printf("Starting console_test at %p\n", (void *) context.pc);
+    printf("Starting console_test at %p\n", (void*)context.pc);
     err = seL4_TCB_WriteRegisters(user_process.tcb, 1, 0, 2, &context);
     ZF_LOGE_IF(err, "Failed to write registers");
     return err == seL4_NoError;
@@ -491,10 +509,9 @@ bool start_first_process(char *app_name, seL4_CPtr ep)
  * Note that these objects will never be freed, so we do not
  * track the allocated ut objects anywhere
  */
-static void sos_ipc_init(seL4_CPtr *ipc_ep, seL4_CPtr *ntfn)
-{
+static void sos_ipc_init(seL4_CPtr* ipc_ep, seL4_CPtr* ntfn) {
     /* Create an notification object for interrupts */
-    ut_t *ut = alloc_retype(ntfn, seL4_NotificationObject, seL4_NotificationBits);
+    ut_t* ut = alloc_retype(ntfn, seL4_NotificationObject, seL4_NotificationBits);
     ZF_LOGF_IF(!ut, "No memory for notification object");
 
     /* Bind the notification object to our TCB */
@@ -507,14 +524,12 @@ static void sos_ipc_init(seL4_CPtr *ipc_ep, seL4_CPtr *ntfn)
 }
 
 /* called by crt */
-seL4_CPtr get_seL4_CapInitThreadTCB(void)
-{
+seL4_CPtr get_seL4_CapInitThreadTCB(void) {
     return seL4_CapInitThreadTCB;
 }
 
 /* tell muslc about our "syscalls", which will be called by muslc on invocations to the c library */
-void init_muslc(void)
-{
+void init_muslc(void) {
     setbuf(stdout, NULL);
 
     muslcsys_install_syscall(__NR_set_tid_address, sys_set_tid_address);
@@ -528,7 +543,7 @@ void init_muslc(void)
     muslcsys_install_syscall(__NR_exit_group, sys_exit_group);
     muslcsys_install_syscall(__NR_ioctl, sys_ioctl);
     muslcsys_install_syscall(__NR_mmap, sys_mmap);
-    muslcsys_install_syscall(__NR_brk,  sys_brk);
+    muslcsys_install_syscall(__NR_brk, sys_brk);
     muslcsys_install_syscall(__NR_clock_gettime, sys_clock_gettime);
     muslcsys_install_syscall(__NR_nanosleep, sys_nanosleep);
     muslcsys_install_syscall(__NR_getuid, sys_getuid);
@@ -552,8 +567,7 @@ void init_muslc(void)
     muslcsys_install_syscall(__NR_madvise, sys_madvise);
 }
 
-NORETURN void *main_continued(UNUSED void *arg)
-{
+NORETURN void* main_continued(UNUSED void* arg) {
     /* Initialise other system compenents here */
     seL4_CPtr ipc_ep, ntfn;
     sos_ipc_init(&ipc_ep, &ntfn);
@@ -562,14 +576,13 @@ NORETURN void *main_continued(UNUSED void *arg)
         seL4_CapIRQControl,
         ntfn,
         IRQ_EP_BADGE,
-        IRQ_IDENT_BADGE_BITS
-    );
+        IRQ_IDENT_BADGE_BITS);
 
     /* Initialize threads library */
 #ifdef CONFIG_SOS_GDB_ENABLED
     /* Create an endpoint that the GDB threads listens to */
     seL4_CPtr gdb_recv_ep;
-    ut_t *ep_ut = alloc_retype(&gdb_recv_ep, seL4_EndpointObject, seL4_EndpointBits);
+    ut_t* ep_ut = alloc_retype(&gdb_recv_ep, seL4_EndpointObject, seL4_EndpointBits);
     ZF_LOGF_IF(ep_ut == NULL, "Failed to create GDB endpoint");
 
     init_threads(ipc_ep, gdb_recv_ep, sched_ctrl_start, sched_ctrl_end);
@@ -585,11 +598,16 @@ NORETURN void *main_continued(UNUSED void *arg)
     /* Map the timer device (NOTE: this is the same mapping you will use for your timer driver -
      * sos uses the watchdog timers on this page to implement reset infrastructure & network ticks,
      * so touching the watchdog timers here is not recommended!) */
-    void *timer_vaddr = sos_map_device(&cspace, PAGE_ALIGN_4K(TIMER_MAP_BASE), PAGE_SIZE_4K);
+    void* timer_vaddr = sos_map_device(&cspace, PAGE_ALIGN_4K(TIMER_MAP_BASE), PAGE_SIZE_4K);
 
     /* Initialise the network hardware. */
     printf("Network init\n");
     network_init(&cspace, timer_vaddr, ntfn);
+
+    // Set up netconsole here?
+    netcon = network_console_init();
+    // printf("Sending test packets...\n");
+    // network_console_send(netcon, "CY test!\n", 9);
 
 #ifdef CONFIG_SOS_GDB_ENABLED
     /* Initialize the debugger */
@@ -609,25 +627,26 @@ NORETURN void *main_continued(UNUSED void *arg)
     bool success = start_first_process(APP_NAME, ipc_ep);
     ZF_LOGF_IF(!success, "Failed to start first process");
 
+    // Main loop SOS
     printf("\nSOS entering syscall loop\n");
     syscall_loop(ipc_ep);
 }
 /*
- * Main entry point - called by crt.
  */
-int main(void)
-{
+int main(void) {
     init_muslc();
 
     /* register the location of the unwind_tables -- this is required for
      * backtrace() to work */
     __register_frame(&__eh_frame_start);
 
-    seL4_BootInfo *boot_info = sel4runtime_bootinfo();
+    seL4_BootInfo* boot_info = sel4runtime_bootinfo();
 
     debug_print_bootinfo(boot_info);
 
+    printf("\n Hello from CY :)");
     printf("\nSOS Starting...\n");
+    printf("\n0211 test\n");
 
     NAME_THREAD(seL4_CapInitThreadTCB, "SOS:root");
 
@@ -641,7 +660,7 @@ int main(void)
      * kernel is built with support for printing, and is much slower, as each character print
      * goes via the kernel)
      *
-     * NOTE we share this uart with the kernel when the kernel is in debug mode. */
+     *  we share this uart with the kernel when the kernel is in debug mode. */
     uart_init(&cspace);
     update_vputchar(uart_putchar);
 
@@ -653,7 +672,7 @@ int main(void)
     seL4_Word vaddr = SOS_STACK;
     for (int i = 0; i < SOS_STACK_PAGES; i++) {
         seL4_CPtr frame_cap;
-        ut_t *frame = alloc_retype(&frame_cap, seL4_ARM_SmallPageObject, seL4_PageBits);
+        ut_t* frame = alloc_retype(&frame_cap, seL4_ARM_SmallPageObject, seL4_PageBits);
         ZF_LOGF_IF(frame == NULL, "Failed to allocate stack page");
         seL4_Error err = map_frame(&cspace, frame_cap, seL4_CapInitThreadVSpace,
                                    vaddr, seL4_AllRights, seL4_ARM_Default_VMAttributes);
@@ -661,9 +680,10 @@ int main(void)
         vaddr += PAGE_SIZE_4K;
     }
 
-    utils_run_on_stack((void *) vaddr, main_continued, NULL);
+    // manual context switch.
+    // change stack pointer
+    utils_run_on_stack((void*)vaddr, main_continued, NULL);
 
+    // NOTE: What does unreachable mean? Why it is unreachable
     UNREACHABLE();
 }
-
-
